@@ -68,67 +68,54 @@ async def send_whatsapp(msg: str) -> None:
 
 EXTRACT_JS = """
 () => {
-    const monthRe = /(Janeiro|Fevereiro|Mar[çc]o|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)\\s+(\\d{4})/i;
+    // Mantine DatePicker: each day is a <button> with aria-label="5 abril 2026"
+    // and price in a <span> with class text-[9px] containing "R$ 1948,00"
+    const monthMap = {
+        'janeiro': 'janeiro', 'fevereiro': 'fevereiro', 'março': 'marco',
+        'marco': 'marco', 'abril': 'abril', 'maio': 'maio', 'junho': 'junho',
+        'julho': 'julho', 'agosto': 'agosto', 'setembro': 'setembro',
+        'outubro': 'outubro', 'novembro': 'novembro', 'dezembro': 'dezembro'
+    };
 
-    function parsePrice(text) {
-        const m = text.match(/R\\$\\s*([\\d.,]+)/);
-        return m ? m[1] : null;
+    const dayButtons = document.querySelectorAll('button.mantine-DatePicker-day, button[class*="mantine-DatePicker-day"]');
+
+    if (dayButtons.length === 0) {
+        return { error: 'Nenhum botão de dia encontrado (mantine-DatePicker-day)' };
     }
 
-    function findDayCells(root) {
-        const cells = [];
-        root.querySelectorAll('*').forEach(el => {
-            if (el.children.length > 8) return;
-            const text = (el.innerText || '').trim();
-            const lines = text.split(/[\\n\\r]+/).map(s => s.trim()).filter(Boolean);
-            if (lines.length < 2) return;
-            const dayNum = parseInt(lines[0], 10);
-            if (isNaN(dayNum) || dayNum < 1 || dayNum > 31) return;
-            const price = parsePrice(text);
-            if (!price) return;
-            const bbox = el.getBoundingClientRect();
-            if (bbox.width > 200) return;
-            cells.push({ day: dayNum, price, x: bbox.left, y: bbox.top });
-        });
-        return cells;
-    }
+    const grouped = {};
 
-    const headers = [];
-    document.querySelectorAll('*').forEach(el => {
-        if (el.children.length > 3) return;
-        const text = (el.innerText || '').trim();
-        if (monthRe.test(text) && text.length < 30) headers.push(el);
-    });
-
-    if (headers.length === 0) return { error: 'Nenhum header de mês encontrado' };
-
-    const result = [];
-    const visited = new WeakSet();
-
-    for (const header of headers) {
-        const match = (header.innerText || '').match(monthRe);
+    for (const btn of dayButtons) {
+        const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
+        // aria-label format: "5 abril 2026"
+        const match = ariaLabel.match(/^(\\d{1,2})\\s+(\\S+)\\s+(\\d{4})$/);
         if (!match) continue;
-        const monthName = match[1].toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
-        const year = parseInt(match[2], 10);
 
-        let container = header;
-        let cells = [];
-        for (let depth = 0; depth < 10; depth++) {
-            container = container.parentElement;
-            if (!container) break;
-            if (visited.has(container)) break;
-            cells = findDayCells(container);
-            if (cells.length >= 10) {
-                visited.add(container);
-                break;
-            }
-        }
+        const day = parseInt(match[1], 10);
+        const monthRaw = match[2].toLowerCase();
+        const year = parseInt(match[3], 10);
 
-        if (cells.length >= 10) {
-            result.push({ month: monthName, year, days: cells });
+        // Normalize month name (remove accents)
+        const monthNorm = monthRaw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
+
+        // Find price in span with class text-[9px] or similar small text
+        const priceSpan = btn.querySelector('span[class*="text-[9px]"], span[class*="text-[10px]"]');
+        if (!priceSpan) continue;
+        const priceText = priceSpan.textContent.trim();
+        const priceMatch = priceText.match(/R\\$\\s*([\\d.,]+)/);
+        if (!priceMatch) continue;
+
+        const key = monthNorm + '_' + year;
+        if (!grouped[key]) {
+            grouped[key] = { month: monthNorm, year: year, days: [] };
         }
+        grouped[key].days.push({ day: day, price: priceMatch[1] });
     }
 
+    const result = Object.values(grouped);
+    if (result.length === 0) {
+        return { error: 'Botões encontrados (' + dayButtons.length + ') mas nenhum com preço extraível' };
+    }
     return result;
 }
 """
