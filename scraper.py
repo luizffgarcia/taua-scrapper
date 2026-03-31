@@ -189,6 +189,60 @@ async def extract_prices(page) -> list[dict]:
 
     return prices
 
+async def dismiss_popup(page) -> None:
+    """Tenta fechar qualquer popup/modal que apareça na página inicial."""
+    popup_selectors = [
+        "button:has-text('Fechar')",
+        "button:has-text('fechar')",
+        "button:has-text('Não')",
+        "[aria-label='Close']",
+        "[aria-label='Fechar']",
+        "button.close",
+        "[class*='close']",
+        "[class*='dismiss']",
+        "button:has-text('×')",
+        "button:has-text('X')",
+    ]
+    for sel in popup_selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=1_000):
+                await el.click(timeout=2_000)
+                print(f"Popup fechado com: {sel}")
+                await page.wait_for_timeout(1_000)
+                return
+        except Exception:
+            continue
+
+    # Tenta fechar clicando em overlay escuro de fundo
+    try:
+        closed = await page.evaluate("""
+        () => {
+            const overlays = document.querySelectorAll('[class*="overlay"], [class*="backdrop"], [class*="modal"]');
+            for (const el of overlays) {
+                const style = window.getComputedStyle(el);
+                if (style.position === 'fixed' || style.position === 'absolute') {
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        }
+        """)
+        if closed:
+            print("Popup fechado via overlay click")
+            await page.wait_for_timeout(1_000)
+    except Exception:
+        pass
+
+    # Tenta tecla Escape como último recurso
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+
 async def open_calendar(page) -> bool:
     """Seleciona o hotel Atibaia e abre o calendário de datas."""
     print(f"Carregando {HOTEL_URL} ...")
@@ -201,6 +255,10 @@ async def open_calendar(page) -> bool:
         f.write(html)
     await page.screenshot(path="debug_1_inicial.png", full_page=True)
     print(f"Título: {await page.title()} | URL: {page.url}")
+
+    # Fecha popup se existir
+    await dismiss_popup(page)
+    await page.screenshot(path="debug_1b_pos_popup.png")
 
     # Dump de todos os elementos interativos visíveis
     elements = await page.evaluate("""
@@ -224,64 +282,56 @@ async def open_calendar(page) -> bool:
         print(f"  {el['tag']} | {el['text']!r} | class={el['cls']!r} | id={el['id']!r}")
     print("===")
 
-    # Tenta clicar no seletor de hotel esperando mais tempo
+    # --- Passo 1: Clicar no botão DESTINO para abrir o dropdown ---
     print("Clicando em 'Escolher o hotel'...")
     selectors_hotel = [
+        "button:has-text('Escolher o hotel')",
         "text=Escolher o hotel",
-        "text=Escolher hotel",
-        "text=Selecione o hotel",
-        "text=Destino",
-        "[class*='destination']",
-        "[class*='hotel-select']",
-        "[class*='destino']",
-        "[placeholder*='hotel']",
-        "[placeholder*='destino']",
-        "[placeholder*='Destino']",
-        "[role='combobox']",
+        "button:has-text('DESTINO')",
+        "text=DESTINO",
     ]
 
     clicked = False
     for sel in selectors_hotel:
         try:
-            await page.wait_for_selector(sel, timeout=5_000, state="visible")
-            await page.click(sel, timeout=5_000)
-            clicked = True
-            print(f"Clicado: {sel}")
-            break
-        except PlaywrightTimeout:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=3_000):
+                await el.click(timeout=5_000)
+                clicked = True
+                print(f"Clicado: {sel}")
+                break
+        except (PlaywrightTimeout, Exception):
             continue
 
     if not clicked:
-        # Tenta iframes com about:blank que podem ter carregado depois
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            try:
-                frame_content = await frame.content()
-                if len(frame_content) < 200:
-                    continue
-                print(f"  Frame com conteúdo ({len(frame_content)} chars): {frame.url[:80]}")
-                for sel in selectors_hotel:
-                    try:
-                        await frame.click(sel, timeout=2_000)
-                        clicked = True
-                        print(f"  Encontrado em frame: {sel}")
-                        break
-                    except PlaywrightTimeout:
-                        continue
-            except Exception:
-                continue
+        # Fallback: tenta click via JavaScript no botão que contém "Escolher o hotel"
+        try:
+            clicked = await page.evaluate("""
+            () => {
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    if (btn.innerText && btn.innerText.includes('Escolher o hotel')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """)
             if clicked:
-                break
+                print("Clicado via JS: botão 'Escolher o hotel'")
+        except Exception:
+            pass
 
     if not clicked:
         print("ERRO: não encontrou o seletor do hotel")
         await page.screenshot(path="debug_erro_hotel.png")
         return False
 
-    await page.wait_for_timeout(1_500)
+    await page.wait_for_timeout(2_000)
     await page.screenshot(path="debug_2_dropdown.png")
 
+    # --- Passo 2: Selecionar Tauá Resort Atibaia / SP no dropdown ---
     print("Selecionando Tauá Resort Atibaia / SP...")
     selectors_atibaia = [
         "text=Tauá Resort Atibaia / SP",
@@ -290,52 +340,163 @@ async def open_calendar(page) -> bool:
         "text=Atibaia",
     ]
     clicked = False
-    for frame in [page] + [f for f in page.frames if f != page.main_frame]:
-        for sel in selectors_atibaia:
-            try:
-                await frame.click(sel, timeout=4_000)
+    for sel in selectors_atibaia:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=3_000):
+                await el.click(timeout=4_000)
                 clicked = True
+                print(f"Selecionado: {sel}")
                 break
-            except PlaywrightTimeout:
-                continue
-        if clicked:
-            break
+        except (PlaywrightTimeout, Exception):
+            continue
+
+    if not clicked:
+        # Fallback via JS
+        try:
+            clicked = await page.evaluate("""
+            () => {
+                const els = document.querySelectorAll('*');
+                for (const el of els) {
+                    const text = (el.innerText || '').trim();
+                    if (text.includes('Atibaia') && text.length < 60 && el.offsetParent !== null) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """)
+            if clicked:
+                print("Selecionado via JS: Atibaia")
+        except Exception:
+            pass
 
     if not clicked:
         print("ERRO: não encontrou a opção Atibaia")
         await page.screenshot(path="debug_erro_atibaia.png")
         return False
 
-    await page.wait_for_timeout(1_500)
+    await page.wait_for_timeout(2_000)
     await page.screenshot(path="debug_3_hotel_selecionado.png")
 
+    # --- Passo 3: Abrir o calendário de datas ---
     print("Abrindo calendário de datas...")
     selectors_dates = [
+        "button:has-text('Selecione as datas')",
         "text=Selecione as datas",
-        "text=Check-in",
-        "text=Data",
+        "button:has-text('DATAS')",
+        "text=DATAS",
         "[class*='date-picker']",
         "[class*='checkin']",
-        "[class*='dates']",
     ]
     clicked = False
-    for frame in [page] + [f for f in page.frames if f != page.main_frame]:
-        for sel in selectors_dates:
-            try:
-                await frame.click(sel, timeout=4_000)
+    for sel in selectors_dates:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=3_000):
+                await el.click(timeout=4_000)
                 clicked = True
+                print(f"Calendário aberto com: {sel}")
                 break
-            except PlaywrightTimeout:
-                continue
-        if clicked:
-            break
+        except (PlaywrightTimeout, Exception):
+            continue
+
+    if not clicked:
+        # Fallback via JS
+        try:
+            clicked = await page.evaluate("""
+            () => {
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    if (btn.innerText && btn.innerText.includes('Selecione as datas')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """)
+            if clicked:
+                print("Calendário aberto via JS")
+        except Exception:
+            pass
 
     if not clicked:
         print("AVISO: calendário pode já estar aberto")
 
-    await page.wait_for_timeout(2_500)
+    await page.wait_for_timeout(3_000)
+
+    # Verifica se o popover do calendário (Mantine DatePicker) está visível
+    calendar_visible = await page.evaluate("""
+    () => {
+        const popover = document.querySelector('[class*="mantine-Popover-dropdown"]');
+        if (popover && popover.offsetParent !== null) return 'popover';
+        const grid = document.querySelector('[class*="mantine-DatePicker-levelsGroup"]');
+        if (grid && grid.offsetParent !== null) return 'grid';
+        return null;
+    }
+    """)
+    print(f"Calendário visível: {calendar_visible}")
     await page.screenshot(path="debug_4_calendario.png")
     return True
+
+
+async def click_next_month(page) -> bool:
+    """Clica no botão de próximo mês no calendário Mantine DatePicker."""
+    try:
+        # Mantine DatePicker usa botões com aria-label ou data-next para navegar
+        next_selectors = [
+            "[class*='mantine-DatePicker-calendarHeaderControl'][data-direction='next']",
+            "[class*='calendarHeaderControl'][data-next]",
+            "button[data-direction='next']",
+            "[class*='mantine-DatePicker'] button[aria-label='Next month']",
+            "[class*='mantine-DatePicker'] button:has-text('>')",
+        ]
+        for sel in next_selectors:
+            try:
+                el = page.locator(sel).last  # last = rightmost month's next button
+                if await el.is_visible(timeout=2_000):
+                    await el.click(timeout=3_000)
+                    print(f"Próximo mês clicado com: {sel}")
+                    await page.wait_for_timeout(2_000)
+                    return True
+            except (PlaywrightTimeout, Exception):
+                continue
+
+        # Fallback via JS: procura botões de controle do calendário Mantine
+        clicked = await page.evaluate("""
+        () => {
+            // Mantine calendar header controls
+            const controls = document.querySelectorAll('[class*="calendarHeaderControl"]');
+            // O último botão de "next" geralmente é o da direita
+            for (const ctrl of controls) {
+                const dir = ctrl.getAttribute('data-direction');
+                if (dir === 'next') {
+                    ctrl.click();
+                    return true;
+                }
+            }
+            // Fallback: tenta o último botão com seta para direita
+            const arrows = document.querySelectorAll('button svg');
+            if (arrows.length > 0) {
+                const lastArrow = arrows[arrows.length - 1];
+                lastArrow.closest('button').click();
+                return true;
+            }
+            return false;
+        }
+        """)
+        if clicked:
+            print("Próximo mês clicado via JS")
+            await page.wait_for_timeout(2_000)
+            return True
+
+        print("AVISO: não conseguiu avançar para o próximo mês")
+        return False
+    except Exception as exc:
+        print(f"Erro ao clicar próximo mês: {exc}")
+        return False
 
 def find_promotions(prices: list[dict]) -> list[dict]:
     promos = []
