@@ -393,11 +393,14 @@ async def open_calendar(page) -> bool:
 
     # --- Passo 2: Selecionar Tauá Resort Atibaia / SP no dropdown ---
     print("Selecionando Tauá Resort Atibaia / SP...")
+
+    # O dropdown contém <p> elements com os nomes dos hotéis
+    # IMPORTANTE: usar Playwright click (não JS click) para disparar eventos React
     selectors_atibaia = [
+        "p:has-text('Tauá Resort Atibaia / SP')",
+        "p:has-text('Tauá Resort Atibaia')",
         "text=Tauá Resort Atibaia / SP",
         "text=Tauá Resort Atibaia",
-        "text=Atibaia / SP",
-        "text=Atibaia",
     ]
     clicked = False
     for sel in selectors_atibaia:
@@ -408,19 +411,23 @@ async def open_calendar(page) -> bool:
                 clicked = True
                 print(f"Selecionado: {sel}")
                 break
-        except (PlaywrightTimeout, Exception):
+        except (PlaywrightTimeout, Exception) as e:
+            print(f"  Falhou {sel}: {e}")
             continue
 
     if not clicked:
-        # Fallback via JS
+        # Fallback: usar dispatchEvent para simular click com eventos React
         try:
             clicked = await page.evaluate("""
             () => {
-                const els = document.querySelectorAll('*');
-                for (const el of els) {
-                    const text = (el.innerText || '').trim();
-                    if (text.includes('Atibaia') && text.length < 60 && el.offsetParent !== null) {
-                        el.click();
+                const paragraphs = document.querySelectorAll('p');
+                for (const p of paragraphs) {
+                    const text = (p.textContent || '').trim();
+                    if (text.includes('Atibaia') && text.includes('SP')) {
+                        // Dispatch mousedown/mouseup/click para React
+                        ['mousedown', 'mouseup', 'click'].forEach(evtName => {
+                            p.dispatchEvent(new MouseEvent(evtName, { bubbles: true, cancelable: true }));
+                        });
                         return true;
                     }
                 }
@@ -428,7 +435,7 @@ async def open_calendar(page) -> bool:
             }
             """)
             if clicked:
-                print("Selecionado via JS: Atibaia")
+                print("Selecionado via dispatchEvent: Atibaia / SP")
         except Exception:
             pass
 
@@ -437,68 +444,79 @@ async def open_calendar(page) -> bool:
         await page.screenshot(path="debug_erro_atibaia.png")
         return False
 
-    await page.wait_for_timeout(2_000)
+    await page.wait_for_timeout(3_000)
     await page.screenshot(path="debug_3_hotel_selecionado.png")
 
-    # --- Passo 3: Abrir o calendário de datas ---
-    print("Abrindo calendário de datas...")
-    selectors_dates = [
-        "button:has-text('Selecione as datas')",
-        "text=Selecione as datas",
-        "button:has-text('DATAS')",
-        "text=DATAS",
-        "[class*='date-picker']",
-        "[class*='checkin']",
-    ]
-    clicked = False
-    for sel in selectors_dates:
-        try:
-            el = page.locator(sel).first
-            if await el.is_visible(timeout=3_000):
-                await el.click(timeout=4_000)
-                clicked = True
-                print(f"Calendário aberto com: {sel}")
-                break
-        except (PlaywrightTimeout, Exception):
-            continue
+    # --- Passo 3: Esperar o grid do calendário carregar ---
+    # Após selecionar o hotel, o calendário com preços deve aparecer automaticamente
+    # O grid tem classe "mantine-DatePicker-levelsGroup"
+    print("Esperando calendário carregar...")
 
-    if not clicked:
-        # Fallback via JS
+    calendar_loaded = False
+    # Primeiro tenta esperar o grid aparecer diretamente
+    try:
+        await page.wait_for_selector(
+            '[class*="mantine-DatePicker-levelsGroup"]',
+            timeout=10_000,
+            state="visible"
+        )
+        calendar_loaded = True
+        print("Grid do calendário encontrado!")
+    except PlaywrightTimeout:
+        print("Grid não apareceu diretamente, tentando clicar em DATAS...")
+
+    if not calendar_loaded:
+        # Tenta clicar no botão DATAS para abrir o calendário
+        selectors_dates = [
+            "button:has-text('Selecione as datas')",
+            "text=Selecione as datas",
+            "button:has-text('DATAS')",
+        ]
+        for sel in selectors_dates:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=3_000):
+                    await el.click(timeout=4_000)
+                    print(f"Clicado: {sel}")
+                    break
+            except (PlaywrightTimeout, Exception):
+                continue
+
+        # Espera novamente pelo grid
         try:
-            clicked = await page.evaluate("""
-            () => {
-                const buttons = document.querySelectorAll('button');
-                for (const btn of buttons) {
-                    if (btn.innerText && btn.innerText.includes('Selecione as datas')) {
-                        btn.click();
-                        return true;
-                    }
-                }
-                return false;
-            }
-            """)
-            if clicked:
-                print("Calendário aberto via JS")
-        except Exception:
+            await page.wait_for_selector(
+                '[class*="mantine-DatePicker-levelsGroup"]',
+                timeout=10_000,
+                state="visible"
+            )
+            calendar_loaded = True
+            print("Grid do calendário encontrado após clicar DATAS!")
+        except PlaywrightTimeout:
             pass
 
-    if not clicked:
-        print("AVISO: calendário pode já estar aberto")
+    if not calendar_loaded:
+        # Verifica se há botões com R$ na página (calendário pode ter outro seletor)
+        has_prices = await page.evaluate("""
+        () => {
+            const buttons = document.querySelectorAll('button');
+            let count = 0;
+            for (const b of buttons) {
+                if ((b.textContent || '').includes('R$')) count++;
+            }
+            return count;
+        }
+        """)
+        print(f"Botões com R$ na página: {has_prices}")
+        if has_prices > 0:
+            calendar_loaded = True
 
-    await page.wait_for_timeout(3_000)
-
-    # Verifica se o popover do calendário (Mantine DatePicker) está visível
-    calendar_visible = await page.evaluate("""
-    () => {
-        const popover = document.querySelector('[class*="mantine-Popover-dropdown"]');
-        if (popover && popover.offsetParent !== null) return 'popover';
-        const grid = document.querySelector('[class*="mantine-DatePicker-levelsGroup"]');
-        if (grid && grid.offsetParent !== null) return 'grid';
-        return null;
-    }
-    """)
-    print(f"Calendário visível: {calendar_visible}")
     await page.screenshot(path="debug_4_calendario.png")
+
+    if not calendar_loaded:
+        print("ERRO: calendário não carregou")
+        return False
+
+    print("Calendário carregado com sucesso!")
     return True
 
 
