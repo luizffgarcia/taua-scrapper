@@ -190,34 +190,86 @@ async def extract_prices(page) -> list[dict]:
     return prices
 
 async def open_calendar(page) -> bool:
+    """Seleciona o hotel Atibaia e abre o calendário de datas."""
     print(f"Carregando {HOTEL_URL} ...")
-    await page.goto(HOTEL_URL, wait_until="domcontentloaded", timeout=60_000)
-    await page.wait_for_timeout(3_000)
+    await page.goto(HOTEL_URL, wait_until="networkidle", timeout=60_000)
+    await page.wait_for_timeout(5_000)
     await page.screenshot(path="debug_1_inicial.png")
 
-    print("Clicando em 'Escolher o hotel'...")
-    selectors_hotel = [
-        "text=Escolher o hotel",
-        "[class*='destination']",
-        "[placeholder*='hotel']",
-        "[placeholder*='destino']",
+    # Salva HTML para depuração
+    html = await page.content()
+    with open("debug_page.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"Título da página: {await page.title()}")
+
+    # Fecha popup de cookies/LGPD se existir
+    print("Verificando popup de cookies/LGPD...")
+    consent_selectors = [
+        "text=Aceitar todos", "text=Aceitar", "text=Aceito",
+        "text=Aceitar cookies", "text=OK", "text=Entendi",
+        "[class*='accept']", "[id*='cookie'] button",
+        "[id*='lgpd'] button", "[class*='cookie'] button",
+        "button[class*='primary']",
     ]
-    clicked = False
-    for sel in selectors_hotel:
+    for sel in consent_selectors:
         try:
-            await page.click(sel, timeout=6_000)
-            clicked = True
+            await page.click(sel, timeout=2_000)
+            print(f"Popup fechado: {sel}")
+            await page.wait_for_timeout(1_000)
             break
         except PlaywrightTimeout:
             continue
+
+    await page.screenshot(path="debug_2_apos_consent.png")
+
+    # Tenta encontrar o seletor de hotel na página principal e em iframes
+    print("Clicando em 'Escolher o hotel'...")
+    selectors_hotel = [
+        "text=Escolher o hotel",
+        "text=Escolher hotel",
+        "[class*='destination']",
+        "[class*='hotel-select']",
+        "[placeholder*='hotel']",
+        "[placeholder*='destino']",
+        "[class*='search'] [class*='select']",
+    ]
+
+    clicked = False
+    # Tenta na página principal
+    for sel in selectors_hotel:
+        try:
+            await page.click(sel, timeout=5_000)
+            clicked = True
+            print(f"Hotel selector encontrado: {sel}")
+            break
+        except PlaywrightTimeout:
+            continue
+
+    # Se não encontrou, tenta dentro de iframes
     if not clicked:
-        print("ERRO: não encontrou o seletor do hotel")
+        print(f"Iframes na página: {len(page.frames)}")
+        for frame in page.frames[1:]:  # pula o frame principal
+            print(f"  Tentando iframe: {frame.url}")
+            for sel in selectors_hotel:
+                try:
+                    await frame.click(sel, timeout=3_000)
+                    clicked = True
+                    print(f"  Encontrado em iframe: {sel}")
+                    break
+                except PlaywrightTimeout:
+                    continue
+            if clicked:
+                break
+
+    if not clicked:
+        print("ERRO: não encontrou o seletor do hotel em nenhum frame")
         await page.screenshot(path="debug_erro_hotel.png")
         return False
 
-    await page.wait_for_timeout(1_200)
-    await page.screenshot(path="debug_2_dropdown.png")
+    await page.wait_for_timeout(1_500)
+    await page.screenshot(path="debug_3_dropdown.png")
 
+    # Seleciona Atibaia
     print("Selecionando Tauá Resort Atibaia / SP...")
     selectors_atibaia = [
         "text=Tauá Resort Atibaia / SP",
@@ -226,80 +278,54 @@ async def open_calendar(page) -> bool:
         "text=Atibaia",
     ]
     clicked = False
-    for sel in selectors_atibaia:
-        try:
-            await page.click(sel, timeout=6_000)
-            clicked = True
+    for frame in [page] + list(page.frames[1:]):
+        for sel in selectors_atibaia:
+            try:
+                await frame.click(sel, timeout=5_000)
+                clicked = True
+                break
+            except PlaywrightTimeout:
+                continue
+        if clicked:
             break
-        except PlaywrightTimeout:
-            continue
+
     if not clicked:
         print("ERRO: não encontrou a opção Atibaia")
         await page.screenshot(path="debug_erro_atibaia.png")
         return False
 
     await page.wait_for_timeout(1_500)
-    await page.screenshot(path="debug_3_hotel_selecionado.png")
+    await page.screenshot(path="debug_4_hotel_selecionado.png")
 
+    # Abre calendário de datas
     print("Abrindo calendário de datas...")
     selectors_dates = [
         "text=Selecione as datas",
+        "text=Check-in",
         "[class*='date-picker']",
         "[class*='checkin']",
         "[class*='dates']",
     ]
     clicked = False
-    for sel in selectors_dates:
-        try:
-            await page.click(sel, timeout=6_000)
-            clicked = True
+    for frame in [page] + list(page.frames[1:]):
+        for sel in selectors_dates:
+            try:
+                await frame.click(sel, timeout=5_000)
+                clicked = True
+                break
+            except PlaywrightTimeout:
+                continue
+        if clicked:
             break
-        except PlaywrightTimeout:
-            continue
+
     if not clicked:
         print("AVISO: não encontrou botão de datas, talvez o calendário já esteja aberto")
 
     await page.wait_for_timeout(2_500)
-    await page.screenshot(path="debug_4_calendario.png")
+    await page.screenshot(path="debug_5_calendario.png")
     return True
 
-async def click_next_month(page) -> bool:
-    selectors_next = [
-        "button[aria-label*='próximo']",
-        "button[aria-label*='next']",
-        "[class*='next']",
-        "button:has-text('›')",
-        "button:has-text('>')",
-        "button:has-text('→')",
-    ]
-    for sel in selectors_next:
-        try:
-            await page.click(sel, timeout=4_000)
-            await page.wait_for_timeout(1_500)
-            return True
-        except PlaywrightTimeout:
-            continue
-    try:
-        clicked = await page.evaluate("""
-        () => {
-            const btns = Array.from(document.querySelectorAll('button, [role=button]'));
-            for (const btn of btns) {
-                const text = (btn.innerText || btn.getAttribute('aria-label') || '').trim();
-                if (/próximo|next|›|>|→/i.test(text)) {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }
-        """)
-        if clicked:
-            await page.wait_for_timeout(1_500)
-            return True
-    except Exception:
-        pass
-    print("AVISO: não conseguiu navegar para próximo mês")
-    return False
+
 
 def find_promotions(prices: list[dict]) -> list[dict]:
     promos = []
