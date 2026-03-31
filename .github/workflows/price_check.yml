@@ -1,0 +1,40 @@
+name: Verificação de Preços - Tauá Resort Atibaia
+
+on:
+  schedule:
+    - cron: "0 11 * * *"   # 08:00 BRT
+    - cron: "0 23 * * *"   # 20:00 BRT
+  workflow_dispatch:
+
+jobs:
+  check-prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências Python
+        run: pip install -r requirements.txt
+
+      - name: Instalar Chromium (Playwright)
+        run: python -m playwright install chromium --with-deps
+
+      - name: Executar monitor de preços
+        env:
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+        run: python scraper.py
+
+      - name: Salvar screenshots de depuração (em caso de falha)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug_*.png
+          if-no-files-found: ignore
