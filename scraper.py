@@ -68,40 +68,97 @@ async def send_whatsapp(msg: str) -> None:
 
 EXTRACT_JS = """
 () => {
-    // Mantine DatePicker: each day is a <button> with aria-label="5 abril 2026"
-    // and price in a <span> with class text-[9px] containing "R$ 1948,00"
-    const monthMap = {
-        'janeiro': 'janeiro', 'fevereiro': 'fevereiro', 'março': 'marco',
-        'marco': 'marco', 'abril': 'abril', 'maio': 'maio', 'junho': 'junho',
-        'julho': 'julho', 'agosto': 'agosto', 'setembro': 'setembro',
-        'outubro': 'outubro', 'novembro': 'novembro', 'dezembro': 'dezembro'
-    };
+    // Strategy 1: find buttons by mantine class
+    let dayButtons = document.querySelectorAll('button.mantine-DatePicker-day, button[class*="mantine-DatePicker-day"]');
 
-    const dayButtons = document.querySelectorAll('button.mantine-DatePicker-day, button[class*="mantine-DatePicker-day"]');
+    // Strategy 2: find buttons by aria-label pattern "DD monthname YYYY"
+    if (dayButtons.length === 0) {
+        const datePattern = /^\\d{1,2}\\s+\\S+\\s+\\d{4}$/;
+        dayButtons = Array.from(document.querySelectorAll('button[aria-label]')).filter(
+            btn => datePattern.test(btn.getAttribute('aria-label').trim())
+        );
+    }
+
+    // Strategy 3: find buttons inside the popover that contain R$
+    if (dayButtons.length === 0) {
+        const popover = document.querySelector('[class*="mantine-Popover-dropdown"], [class*="mantine-DatePicker-levelsGroup"]');
+        if (popover) {
+            dayButtons = Array.from(popover.querySelectorAll('button')).filter(
+                btn => (btn.textContent || '').includes('R$')
+            );
+        }
+    }
+
+    // Strategy 4: any button anywhere containing R$ with a small bounding box (calendar cell)
+    if (dayButtons.length === 0) {
+        dayButtons = Array.from(document.querySelectorAll('button')).filter(btn => {
+            const text = btn.textContent || '';
+            if (!text.includes('R$')) return false;
+            const bbox = btn.getBoundingClientRect();
+            return bbox.width > 30 && bbox.width < 120 && bbox.height > 30 && bbox.height < 80;
+        });
+    }
 
     if (dayButtons.length === 0) {
-        return { error: 'Nenhum botão de dia encontrado (mantine-DatePicker-day)' };
+        // Diagnostic: dump popover contents
+        const popover = document.querySelector('[class*="mantine-Popover-dropdown"]');
+        const popoverInfo = popover
+            ? 'Popover found, children: ' + popover.children.length + ', innerHTML length: ' + popover.innerHTML.length + ', first 500 chars: ' + popover.innerHTML.substring(0, 500)
+            : 'No popover found';
+        const allButtons = document.querySelectorAll('button');
+        const buttonsWithR = Array.from(allButtons).filter(b => (b.textContent || '').includes('R$')).length;
+        return { error: 'Nenhum botão de dia encontrado. Buttons total: ' + allButtons.length + ', with R$: ' + buttonsWithR + '. ' + popoverInfo };
     }
 
     const grouped = {};
 
     for (const btn of dayButtons) {
+        // Try aria-label first: "5 abril 2026"
         const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
-        // aria-label format: "5 abril 2026"
         const match = ariaLabel.match(/^(\\d{1,2})\\s+(\\S+)\\s+(\\d{4})$/);
-        if (!match) continue;
 
-        const day = parseInt(match[1], 10);
-        const monthRaw = match[2].toLowerCase();
-        const year = parseInt(match[3], 10);
+        let day, monthNorm, year;
+        if (match) {
+            day = parseInt(match[1], 10);
+            const monthRaw = match[2].toLowerCase();
+            year = parseInt(match[3], 10);
+            monthNorm = monthRaw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
+        } else {
+            // Fallback: extract day number from button text
+            const spans = btn.querySelectorAll('span');
+            let dayText = null;
+            for (const s of spans) {
+                const t = s.textContent.trim();
+                if (/^\\d{1,2}$/.test(t) && parseInt(t) >= 1 && parseInt(t) <= 31) {
+                    dayText = t;
+                    break;
+                }
+            }
+            if (!dayText) continue;
+            day = parseInt(dayText, 10);
+            // Try to get month/year from nearest header
+            monthNorm = 'unknown';
+            year = new Date().getFullYear();
+        }
 
-        // Normalize month name (remove accents)
-        const monthNorm = monthRaw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
+        // Find price: look for R$ in any span or text node
+        let priceText = null;
+        const allSpans = btn.querySelectorAll('span');
+        for (const s of allSpans) {
+            const t = s.textContent.trim();
+            if (t.match(/R\\$\\s*[\\d.,]+/)) {
+                priceText = t;
+                break;
+            }
+        }
+        if (!priceText) {
+            // Try full button text
+            const btnText = btn.textContent || '';
+            const pm = btnText.match(/R\\$\\s*[\\d.,]+/);
+            if (pm) priceText = pm[0];
+        }
+        if (!priceText) continue;
 
-        // Find price in span with class text-[9px] or similar small text
-        const priceSpan = btn.querySelector('span[class*="text-[9px]"], span[class*="text-[10px]"]');
-        if (!priceSpan) continue;
-        const priceText = priceSpan.textContent.trim();
         const priceMatch = priceText.match(/R\\$\\s*([\\d.,]+)/);
         if (!priceMatch) continue;
 
@@ -121,6 +178,22 @@ EXTRACT_JS = """
 """
 
 async def extract_prices(page) -> list[dict]:
+    # Espera os botões do calendário renderizarem
+    for selector in [
+        "button.mantine-DatePicker-day",
+        "button[class*='mantine-DatePicker-day']",
+        "button[aria-label*='abril'], button[aria-label*='maio'], button[aria-label*='março']",
+    ]:
+        try:
+            await page.wait_for_selector(selector, timeout=5_000, state="attached")
+            print(f"Botões de dia encontrados com: {selector}")
+            break
+        except PlaywrightTimeout:
+            continue
+    else:
+        print("AVISO: nenhum seletor de botão de dia encontrado, tentando extração mesmo assim...")
+        await page.wait_for_timeout(3_000)
+
     try:
         data = await page.evaluate(EXTRACT_JS)
     except Exception as exc:
