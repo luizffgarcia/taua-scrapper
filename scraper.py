@@ -4,8 +4,8 @@ Monitor de preços do Tauá Resort Atibaia / SP.
 Verifica diárias e envia notificação WhatsApp via CallMeBot quando encontrar promoções.
 
 Thresholds:
-  - Dias de semana (Seg-Sex): abaixo de R$ 1.850
-  - Finais de semana (Sáb-Dom): abaixo de R$ 2.200
+  - Dias de semana (Seg-Sex): abaixo de R$ 1.700
+  - Finais de semana (Sáb-Dom): abaixo de R$ 1.700
 """
 
 import asyncio
@@ -23,8 +23,8 @@ PHONE = "5511990178989"
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
 HOTEL_URL = "https://tauaresorts.com.br/atibaia"
 
-WEEKDAY_MAX = 1850.0
-WEEKEND_MAX = 2200.0
+WEEKDAY_MAX = 1700.0
+WEEKEND_MAX = 1700.0
 EXTRA_MONTH_PAGES = 1
 
 MONTHS_PT: dict[str, int] = {
