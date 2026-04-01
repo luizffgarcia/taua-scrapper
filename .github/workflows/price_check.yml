@@ -30,6 +30,7 @@ jobs:
 
       - name: Executar monitor de preços
         env:
+          PHONE: ${{ secrets.PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
         run: python scraper.py
 
