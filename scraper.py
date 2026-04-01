@@ -19,7 +19,7 @@ from typing import Optional
 import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
-PHONE = "5511990178989"
+PHONE = os.environ.get("PHONE", "")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
 HOTEL_URL = "https://tauaresorts.com.br/atibaia"
 
