@@ -23,8 +23,8 @@ PHONE = os.environ.get("PHONE", "")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
 HOTEL_URL = "https://tauaresorts.com.br/atibaia"
 
-WEEKDAY_MAX = 1700.0
-WEEKEND_MAX = 1700.0
+WEEKDAY_MAX = 2700.0
+WEEKEND_MAX = 2700.0
 EXTRA_MONTH_PAGES = 1
 
 MONTHS_PT: dict[str, int] = {
