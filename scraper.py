@@ -592,7 +592,7 @@ def format_message(promotions: list[dict]) -> str:
         tipo = "FDS" if p["is_weekend"] else "Sem"
         lines.append(
             f"{p['day']:02d}/{p['month']:02d}/{p['year']} ({tipo}): "
-            f"R${p['price']:,.0f}"
+            f"R$ {p['price']:.0f}"
         )
     if len(promotions) > 10:
         lines.append(f"...e mais {len(promotions) - 10} datas")
