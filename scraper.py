@@ -586,15 +586,16 @@ def find_promotions(prices: list[dict]) -> list[dict]:
 
 def format_message(promotions: list[dict]) -> str:
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
-    lines = [f"PROMOCAO Taua Resort Atibaia - {now}"]
-    for p in sorted(promotions, key=lambda x: (x["year"], x["month"], x["day"])):
+    lines = [f"PROMOCAO Taua Atibaia - {now}"]
+    sorted_promos = sorted(promotions, key=lambda x: x["price"])[:10]
+    for p in sorted_promos:
         tipo = "FDS" if p["is_weekend"] else "Sem"
-        limite = WEEKEND_MAX if p["is_weekend"] else WEEKDAY_MAX
-        economia = limite - p["price"]
         lines.append(
             f"{p['day']:02d}/{p['month']:02d}/{p['year']} ({tipo}): "
-            f"R$ {p['price']:,.0f}  (-R$ {economia:,.0f})"
+            f"R${p['price']:,.0f}"
         )
+    if len(promotions) > 10:
+        lines.append(f"...e mais {len(promotions) - 10} datas")
     return "\n".join(lines)
 
 async def main() -> None:
