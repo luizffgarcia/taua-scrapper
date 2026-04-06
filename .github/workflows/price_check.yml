@@ -8,6 +8,9 @@ on:
     - cron: "0 23 * * *"   # 20:00 BRT
   workflow_dispatch:
 
+permissions:
+  contents: write   # necessário para salvar last_notification.json no repo
+
 jobs:
   check-prices:
     runs-on: ubuntu-22.04
@@ -32,6 +35,7 @@ jobs:
         env:
           PHONE: ${{ secrets.PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python scraper.py
 
       - name: Salvar screenshots de depuração (em caso de falha)
