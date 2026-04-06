@@ -12,8 +12,10 @@ import asyncio
 import re
 import os
 import sys
+import json
+import base64
 import urllib.parse
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 
 import httpx
@@ -21,11 +23,15 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 PHONE = os.environ.get("PHONE", "")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = "luizffgarcia/taua-scrapper"
+STATE_PATH = "last_notification.json"
 HOTEL_URL = "https://tauaresorts.com.br/atibaia"
 
 WEEKDAY_MAX = 1700.0
 WEEKEND_MAX = 1900.0
 EXTRA_MONTH_PAGES = 1
+NOTIFICATION_COOLDOWN_HOURS = 24
 
 MONTHS_PT: dict[str, int] = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3,
@@ -49,6 +55,62 @@ def parse_brl(text: str) -> Optional[float]:
             pass
     return None
 
+
+# ── Estado de notificação (persiste no repositório via GitHub API) ─────────────
+
+async def get_last_notification() -> tuple[Optional[datetime], Optional[str]]:
+    """Lê o timestamp da última notificação do arquivo de estado no repo.
+    Retorna (datetime_utc, sha_do_arquivo) ou (None, None) se não existir."""
+    if not GITHUB_TOKEN:
+        return None, None
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_PATH}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                content = base64.b64decode(data["content"]).decode()
+                state = json.loads(content)
+                last_sent = datetime.fromisoformat(state["last_sent"])
+                return last_sent, data["sha"]
+            return None, None
+        except Exception as exc:
+            print(f"Aviso ao ler estado: {exc}")
+            return None, None
+
+
+async def save_last_notification(sha: Optional[str]) -> None:
+    """Salva o timestamp atual como última notificação enviada."""
+    if not GITHUB_TOKEN:
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    content_bytes = json.dumps({"last_sent": now_iso}).encode()
+    encoded = base64.b64encode(content_bytes).decode()
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_PATH}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    body: dict = {"message": "chore: update last notification timestamp", "content": encoded}
+    if sha:
+        body["sha"] = sha
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            resp = await client.put(url, headers=headers, json=body)
+            if resp.status_code in (200, 201):
+                print(f"Estado de notificação salvo ({now_iso})")
+            else:
+                print(f"Aviso ao salvar estado: HTTP {resp.status_code} - {resp.text[:200]}")
+        except Exception as exc:
+            print(f"Erro ao salvar estado: {exc}")
+
+
+# ── WhatsApp ──────────────────────────────────────────────────────────────────
+
 async def send_whatsapp(msg: str) -> None:
     if not CALLMEBOT_APIKEY:
         print(f"[SEM APIKEY] Mensagem que seria enviada:\n{msg}")
@@ -66,12 +128,13 @@ async def send_whatsapp(msg: str) -> None:
         except Exception as exc:
             print(f"Erro ao enviar WhatsApp: {exc}")
 
+
+# ── Extração de preços do calendário ─────────────────────────────────────────
+
 EXTRACT_JS = """
 () => {
-    // Strategy 1: find buttons by mantine class
     let dayButtons = document.querySelectorAll('button.mantine-DatePicker-day, button[class*="mantine-DatePicker-day"]');
 
-    // Strategy 2: find buttons by aria-label pattern "DD monthname YYYY"
     if (dayButtons.length === 0) {
         const datePattern = /^\\d{1,2}\\s+\\S+\\s+\\d{4}$/;
         dayButtons = Array.from(document.querySelectorAll('button[aria-label]')).filter(
@@ -79,7 +142,6 @@ EXTRACT_JS = """
         );
     }
 
-    // Strategy 3: find buttons inside the popover that contain R$
     if (dayButtons.length === 0) {
         const popover = document.querySelector('[class*="mantine-Popover-dropdown"], [class*="mantine-DatePicker-levelsGroup"]');
         if (popover) {
@@ -89,7 +151,6 @@ EXTRACT_JS = """
         }
     }
 
-    // Strategy 4: any button anywhere containing R$ with a small bounding box (calendar cell)
     if (dayButtons.length === 0) {
         dayButtons = Array.from(document.querySelectorAll('button')).filter(btn => {
             const text = btn.textContent || '';
@@ -243,19 +304,14 @@ async def extract_prices(page) -> list[dict]:
     return prices
 
 
+# ── Navegação ─────────────────────────────────────────────────────────────────
+
 async def dismiss_popup(page) -> None:
-    """Tenta fechar qualquer popup/modal que apareça na página inicial."""
     popup_selectors = [
-        "button:has-text('Fechar')",
-        "button:has-text('fechar')",
-        "button:has-text('Não')",
-        "[aria-label='Close']",
-        "[aria-label='Fechar']",
-        "button.close",
-        "[class*='close']",
-        "[class*='dismiss']",
-        "button:has-text('×')",
-        "button:has-text('X')",
+        "button:has-text('Fechar')", "button:has-text('fechar')",
+        "button:has-text('Não')", "[aria-label='Close']", "[aria-label='Fechar']",
+        "button.close", "[class*='close']", "[class*='dismiss']",
+        "button:has-text('×')", "button:has-text('X')",
     ]
     for sel in popup_selectors:
         try:
@@ -267,7 +323,6 @@ async def dismiss_popup(page) -> None:
                 return
         except Exception:
             continue
-
     try:
         closed = await page.evaluate("""
         () => {
@@ -287,7 +342,6 @@ async def dismiss_popup(page) -> None:
             await page.wait_for_timeout(1_000)
     except Exception:
         pass
-
     try:
         await page.keyboard.press("Escape")
         await page.wait_for_timeout(500)
@@ -296,7 +350,6 @@ async def dismiss_popup(page) -> None:
 
 
 async def open_calendar(page) -> bool:
-    """Seleciona o hotel Atibaia e abre o calendário de datas."""
     print(f"Carregando {HOTEL_URL} ...")
     await page.goto(HOTEL_URL, wait_until="networkidle", timeout=60_000)
     await page.evaluate("window.scrollTo(0, 0)")
@@ -304,11 +357,8 @@ async def open_calendar(page) -> bool:
     await page.screenshot(path="debug_1_inicial.png")
     print(f"Título: {await page.title()}")
 
-    # Fecha popup se existir
     await dismiss_popup(page)
 
-    # Aguarda o widget de reservas aparecer ativamente (até 30s)
-    # Resolve a race condition onde o widget JS demora para renderizar
     print("Aguardando widget de reservas carregar...")
     widget_found = False
     for sel in ["text=Escolher o hotel", "button:has-text('Escolher o hotel')"]:
@@ -321,7 +371,6 @@ async def open_calendar(page) -> bool:
             continue
 
     if not widget_found:
-        # Fallback: tenta abrir via botão "RESERVE AGORA"
         print("Widget não apareceu, tentando via 'RESERVE AGORA'...")
         try:
             await page.click("button:has-text('RESERVE AGORA')", timeout=5_000)
@@ -336,15 +385,9 @@ async def open_calendar(page) -> bool:
 
     await page.wait_for_timeout(2_000)
 
-    # --- Passo 1: Clicar no seletor de hotel ---
     print("Clicando em 'Escolher o hotel'...")
-    selectors_hotel = [
-        "text=Escolher o hotel",
-        "button:has-text('Escolher o hotel')",
-        "[class*='destination']",
-    ]
     clicked = False
-    for sel in selectors_hotel:
+    for sel in ["text=Escolher o hotel", "button:has-text('Escolher o hotel')", "[class*='destination']"]:
         try:
             await page.locator(sel).first.click(timeout=5_000)
             clicked = True
@@ -354,7 +397,6 @@ async def open_calendar(page) -> bool:
             continue
 
     if not clicked:
-        # Fallback JS
         try:
             clicked = await page.evaluate("""
             () => {
@@ -380,16 +422,12 @@ async def open_calendar(page) -> bool:
     await page.wait_for_timeout(2_000)
     await page.screenshot(path="debug_2_dropdown.png")
 
-    # --- Passo 2: Selecionar Atibaia ---
     print("Selecionando Tauá Resort Atibaia / SP...")
-    selectors_atibaia = [
-        "p:has-text('Tauá Resort Atibaia / SP')",
-        "p:has-text('Tauá Resort Atibaia')",
-        "text=Tauá Resort Atibaia / SP",
-        "text=Tauá Resort Atibaia",
-    ]
     clicked = False
-    for sel in selectors_atibaia:
+    for sel in [
+        "p:has-text('Tauá Resort Atibaia / SP')", "p:has-text('Tauá Resort Atibaia')",
+        "text=Tauá Resort Atibaia / SP", "text=Tauá Resort Atibaia",
+    ]:
         try:
             await page.locator(sel).first.click(timeout=5_000)
             clicked = True
@@ -427,7 +465,6 @@ async def open_calendar(page) -> bool:
     await page.wait_for_timeout(2_000)
     await page.screenshot(path="debug_3_hotel_selecionado.png")
 
-    # --- Passo 3: Aguardar calendário ---
     print("Esperando calendário carregar...")
     calendar_loaded = False
 
@@ -476,7 +513,6 @@ async def open_calendar(page) -> bool:
 
 
 async def click_next_month(page) -> bool:
-    """Clica no botão de próximo mês no calendário Mantine DatePicker."""
     try:
         next_selectors = [
             "[class*='mantine-DatePicker-calendarHeaderControl'][data-direction='next']",
@@ -524,6 +560,8 @@ async def click_next_month(page) -> bool:
         print(f"Erro ao clicar próximo mês: {exc}")
         return False
 
+
+# ── Lógica principal ──────────────────────────────────────────────────────────
 
 def find_promotions(prices: list[dict]) -> list[dict]:
     promos = []
@@ -592,11 +630,7 @@ async def main() -> None:
     promotions = find_promotions(all_prices)
     print(f"Promoções encontradas: {len(promotions)}")
 
-    if promotions:
-        msg = format_message(promotions)
-        print(f"\n{msg}\n")
-        await send_whatsapp(msg)
-    else:
+    if not promotions:
         print("Nenhuma promoção abaixo dos limites configurados.")
         if all_prices:
             sorted_prices = sorted(all_prices, key=lambda x: x["price"])
@@ -604,6 +638,26 @@ async def main() -> None:
             for p in sorted_prices[:5]:
                 tipo = "FDS" if p["is_weekend"] else "Sem"
                 print(f"  {p['day']:02d}/{p['month']:02d}/{p['year']} ({tipo}): R$ {p['price']:,.0f}")
+        return
+
+    # Verifica cooldown de 24 horas antes de enviar
+    last_sent, state_sha = await get_last_notification()
+    if last_sent:
+        now_utc = datetime.now(timezone.utc)
+        # garante que last_sent tem timezone
+        if last_sent.tzinfo is None:
+            last_sent = last_sent.replace(tzinfo=timezone.utc)
+        hours_since = (now_utc - last_sent).total_seconds() / 3600
+        if hours_since < NOTIFICATION_COOLDOWN_HOURS:
+            remaining = NOTIFICATION_COOLDOWN_HOURS - hours_since
+            print(f"Promoções encontradas, mas notificação enviada há {hours_since:.1f}h. "
+                  f"Próximo envio em {remaining:.1f}h.")
+            return
+
+    msg = format_message(promotions)
+    print(f"\n{msg}\n")
+    await send_whatsapp(msg)
+    await save_last_notification(state_sha)
 
 
 if __name__ == "__main__":
