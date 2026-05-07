@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+# patchright = fork de Playwright com correções anti-detecção (PerimeterX/Cloudflare)
+from patchright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 PHONE = os.environ.get("PHONE", "")
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
@@ -226,12 +227,59 @@ EXTRACT_JS = r"""
 """
 
 
+async def dismiss_popups(page) -> None:
+    """Fecha o modal 'You're shopping on iHerb Brazil' e banner de cookies."""
+    selectors = [
+        "button:has-text('Stay on Brazil')",
+        "button:has-text('Continuar no Brasil')",
+        "button:has-text('Permanecer no Brasil')",
+        "button:has-text('Stay')",
+        "button:has-text('Aceitar')",
+        "button:has-text('Accept')",
+        "button:has-text('Concordo')",
+        "button:has-text('OK')",
+        "[aria-label='Close']",
+        "[aria-label='Fechar']",
+        "button[class*='close']",
+    ]
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=1_500):
+                await el.click(timeout=2_000)
+                print(f"  Popup fechado: {sel}")
+                await page.wait_for_timeout(800)
+        except Exception:
+            continue
+
+
+async def detect_challenge(page) -> bool:
+    """Detecta se a página caiu em desafio do PerimeterX/Cloudflare."""
+    title = (await page.title() or "").lower()
+    if any(t in title for t in ["um momento", "just a moment", "checking your browser", "access denied"]):
+        return True
+    # PerimeterX HUMAN injeta um div com texto "PRESS & HOLD"
+    try:
+        body_text = await page.evaluate("() => (document.body.innerText || '').slice(0, 500).toLowerCase()")
+        if "press & hold" in body_text or "press and hold" in body_text or "confirm your identity" in body_text:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def fetch_price() -> Optional[float]:
     """Abre a página do produto e extrai o preço atual em BRL."""
     async with async_playwright() as pw:
+        # Headed (rodando sob xvfb no CI) é muito menos detectável que headless.
+        # Patchright já remove flags como navigator.webdriver, user-agent client hints, etc.
         browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+            headless=False,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
         ctx = await browser.new_context(
             viewport={"width": 1366, "height": 900},
@@ -240,40 +288,75 @@ async def fetch_price() -> Optional[float]:
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             ),
             extra_http_headers={
                 "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
             },
         )
-        # Mascarar webdriver
-        await ctx.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-        )
 
         page = await ctx.new_page()
         try:
-            print(f"Carregando {PRODUCT_URL} ...")
+            # ── Warmup: carrega a homepage primeiro pra ter sessão "natural" ──
+            print("Warmup: carregando https://br.iherb.com/ ...")
+            try:
+                await page.goto("https://br.iherb.com/", wait_until="domcontentloaded", timeout=60_000)
+                await page.wait_for_timeout(3_000)
+            except PlaywrightTimeout:
+                print("Warmup timeout, seguindo mesmo assim.")
+
+            await dismiss_popups(page)
+
+            if await detect_challenge(page):
+                print("Desafio anti-bot detectado na homepage. Aguardando 8s...")
+                await page.wait_for_timeout(8_000)
+
+            # Pequeno scroll pra parecer humano
+            try:
+                await page.mouse.move(400, 300)
+                await page.evaluate("window.scrollBy(0, 200)")
+                await page.wait_for_timeout(1_500)
+            except Exception:
+                pass
+
+            # ── Página do produto ──
+            print(f"Carregando produto: {PRODUCT_URL}")
             await page.goto(PRODUCT_URL, wait_until="domcontentloaded", timeout=60_000)
             try:
                 await page.wait_for_load_state("networkidle", timeout=20_000)
             except PlaywrightTimeout:
                 pass
+            await page.wait_for_timeout(3_000)
 
-            await page.wait_for_timeout(2_000)
+            await dismiss_popups(page)
+            await page.wait_for_timeout(1_500)
 
-            # Salva screenshot para debug
+            # Se ainda há desafio, espera resolver (PerimeterX às vezes libera sozinho)
+            for attempt in range(3):
+                if not await detect_challenge(page):
+                    break
+                print(f"Desafio anti-bot ativo (tentativa {attempt + 1}/3). Aguardando 10s...")
+                await page.wait_for_timeout(10_000)
+                await dismiss_popups(page)
+
+            print(f"Título final: {await page.title()}")
+
             try:
                 await page.screenshot(path="iherb_debug.png", full_page=False)
             except Exception:
                 pass
 
-            print(f"Título: {await page.title()}")
+            if await detect_challenge(page):
+                print("ERRO: bloqueado por desafio anti-bot. Veja iherb_debug.png.")
+                return None
 
             data = await page.evaluate(EXTRACT_JS)
         except PlaywrightTimeout as exc:
             print(f"Timeout na navegação: {exc}")
-            await browser.close()
+            try:
+                await page.screenshot(path="iherb_debug.png", full_page=False)
+            except Exception:
+                pass
             return None
         finally:
             await browser.close()

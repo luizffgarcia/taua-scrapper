@@ -23,21 +23,24 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Instalar xvfb (para rodar Chromium em modo headed)
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
       - name: Instalar dependências Python
         run: pip install -r requirements.txt
 
-      - name: Instalar Chromium (Playwright)
-        run: python -m playwright install chromium --with-deps
+      - name: Instalar Chromium (Patchright — versão patched anti-detecção)
+        run: python -m patchright install chromium --with-deps
 
-      - name: Executar monitor de preço iHerb
+      - name: Executar monitor de preço iHerb (headed sob xvfb)
         env:
           PHONE: ${{ secrets.PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python iherb_scraper.py
+        run: xvfb-run --server-args="-screen 0 1366x900x24" python iherb_scraper.py
 
-      - name: Salvar screenshot de depuração (em caso de falha)
-        if: failure()
+      - name: Salvar screenshot de depuração (sempre, sucesso ou falha)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: iherb-debug
