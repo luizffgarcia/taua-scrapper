@@ -1,0 +1,45 @@
+name: Verificação de Preço - iHerb (Vit C Lipossomal)
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 09:00 BRT
+    - cron: "0 0 * * *"    # 21:00 BRT
+  workflow_dispatch:
+
+permissions:
+  contents: write   # necessário para salvar iherb_last_notification.json no repo
+
+jobs:
+  check-price:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências Python
+        run: pip install -r requirements.txt
+
+      - name: Instalar Chromium (Playwright)
+        run: python -m playwright install chromium --with-deps
+
+      - name: Executar monitor de preço iHerb
+        env:
+          PHONE: ${{ secrets.PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python iherb_scraper.py
+
+      - name: Salvar screenshot de depuração (em caso de falha)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iherb-debug
+          path: iherb_debug.png
+          if-no-files-found: ignore
