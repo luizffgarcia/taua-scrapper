@@ -28,7 +28,7 @@ PRODUCT_URL = (
     "15-2-fl-oz-450-ml/113102"
 )
 PRODUCT_NAME = "Vit C Lipossomal Dr. Mercola"
-PRICE_THRESHOLD = 1150.0
+PRICE_THRESHOLD = 150.0
 STATE_PATH = "iherb_last_notification.json"
 NOTIFICATION_COOLDOWN_HOURS = 24
 
